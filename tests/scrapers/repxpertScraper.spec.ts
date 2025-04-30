@@ -1,34 +1,60 @@
 import { test } from '@playwright/test';
-import * as fs from 'fs';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 import { getTextContent, getMultipleTexts } from '../utils/extractHelpers';
-import { addToRetryList } from '../utils/extractHelpers'; // Add import here
+import { addToRetryList } from '../utils/extractHelpers';
 import ConfigReader from '../utils/ConfigReader';
 import { Product } from '../../types/Product';
 import { Dimensions } from '../../types/Dimensions';
 
-// JSON dosyasından OE numaralarını oku
+// Constants
 const oePath = path.resolve(__dirname, '../../data/Configs/oe-references.json');
-const oeNumbers: string[] = JSON.parse(fs.readFileSync(oePath, 'utf-8'));
-
-// Eksik bulunan OE'leri kaydedeceğimiz dosya
 const retryFilePath = path.resolve(__dirname, '../../data/willBefixed/reTry.json');
 
-// reTry.json'u oku veya boş bir array oluştur
-let retryList: string[] = [];
-if (fs.existsSync(retryFilePath)) {
-  retryList = JSON.parse(fs.readFileSync(retryFilePath, 'utf-8'));
-} else {
-  // Eğer willBefixed klasörü yoksa oluştur
-  const willBeFixedFolderPath = path.dirname(retryFilePath);
-  if (!fs.existsSync(willBeFixedFolderPath)) {
-    fs.mkdirSync(willBeFixedFolderPath, { recursive: true });
+// Helper function to check if a file exists
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-test.describe('REPXPERT TRW ürünleri', () => {
+// Helper function to create a directory if it doesn't exist
+async function ensureDirectoryExists(dirPath: string): Promise<void> {
+  try {
+    await fs.mkdir(dirPath, { recursive: true });
+  } catch (error) {
+    console.error(`Error creating directory at ${dirPath}:`, error);
+  }
+}
+
+// Load OE numbers
+let oeNumbers: string[] = [];
+try {
+  const oeContent = await fs.readFile(oePath, 'utf-8');
+  oeNumbers = JSON.parse(oeContent);
+} catch (error) {
+  console.error(`Error reading OE numbers from ${oePath}:`, error);
+}
+
+// Load or initialize retry list
+let retryList: string[] = [];
+if (await fileExists(retryFilePath)) {
+  try {
+    const retryContent = await fs.readFile(retryFilePath, 'utf-8');
+    retryList = JSON.parse(retryContent);
+  } catch (error) {
+    console.error(`Error reading retry list from ${retryFilePath}:`, error);
+  }
+} else {
+  await ensureDirectoryExists(path.dirname(retryFilePath));
+}
+
+test.describe('REPXPERT TRW Products', () => {
   for (const oe of oeNumbers) {
-    test(`OE No: ${oe} ile TRW ürünlerini al`, async ({ page }) => {
+    test(`Fetch TRW products for OE No: ${oe}`, async ({ page }) => {
       try {
         const filterBrand = ConfigReader.getEnvVariable('FILTER_BRAND') || 'TRW';
 
@@ -37,37 +63,32 @@ test.describe('REPXPERT TRW ürünleri', () => {
         await page.getByRole('textbox', { name: /OE numarası/i }).press('Enter');
 
         await page.getByRole('combobox', { name: /Markalar/i }).fill(filterBrand.toLowerCase() || '');
-
         await page.getByRole('checkbox', { name: new RegExp(filterBrand, 'i') }).first().click();
         await page.waitForTimeout(2000);
 
         const productLinks = await page.getByRole('link', { name: new RegExp(filterBrand, 'i') }).all();
 
         if (productLinks.length === 0) {
-          console.warn(`⚠️ '${oe}' için ${filterBrand} ürünü bulunamadı.`);
-
-          // Eğer bu OE daha önce eklenmediyse retry listesine ekle
+          console.warn(`⚠️ No ${filterBrand} product found for '${oe}'.`);
           if (!retryList.includes(oe)) {
-            addToRetryList(oe);  // Use the helper function here
+            await addToRetryList(oe);
           }
-
           return;
         }
 
         for (let i = 0; i < productLinks.length; i++) {
-          console.log(`🔍 ${oe} için ${i + 1}. ürünü işliyor...`);
+          console.log(`🔍 Processing product ${i + 1} for ${oe}...`);
           if (i > 0) {
             await page.goBack();
             await page.waitForLoadState('domcontentloaded');
-            await page.waitForSelector(`text=${filterBrand}`); // Ürün listesi döndüğünde TRW yazısı görünür olacak
+            await page.waitForSelector(`text=${filterBrand}`);
           }
-          
+
           await Promise.all([
             page.waitForLoadState('domcontentloaded'),
-            page.waitForSelector('.h1'), // Ürün detay sayfasında başlık gelmeden işleme geçme
+            page.waitForSelector('.h1'),
             productLinks[i].click(),
           ]);
-          
 
           const productTitle = (await getTextContent(page.locator('.h1').nth(0))) || 'Unknown Product';
           const productId = productTitle.split(' ')[1] || `${filterBrand}_${i}`;
@@ -99,22 +120,20 @@ test.describe('REPXPERT TRW ürünleri', () => {
           };
 
           const brandFolderPath = path.join('data', product.brand || 'UnknownBrand');
-          if (!fs.existsSync(brandFolderPath)) fs.mkdirSync(brandFolderPath, { recursive: true });
+          await ensureDirectoryExists(brandFolderPath);
 
           const oeFolderPath = path.join(brandFolderPath, oe);
-          if (!fs.existsSync(oeFolderPath)) fs.mkdirSync(oeFolderPath, { recursive: true });
+          await ensureDirectoryExists(oeFolderPath);
 
           const fileName = `${product.brand}_${productId}.json`;
           const filePath = path.join(oeFolderPath, fileName);
 
-          fs.writeFileSync(filePath, JSON.stringify(product, null, 2), 'utf-8');
-          console.log(`✅ ${oe} için ${fileName} kaydedildi.`);
+          await fs.writeFile(filePath, JSON.stringify(product, null, 2), 'utf-8');
+          console.log(`✅ Saved ${fileName} for ${oe}.`);
         }
       } catch (err) {
-        console.error(`❌ ${oe} için hata:`, err);
-
-        // Hata yakalanırsa da o OE numarasını reTry listesine ekle
-        addToRetryList(oe);  // Use the helper function here
+        console.error(`❌ Error for ${oe}:`, err);
+        await addToRetryList(oe);
       }
     });
   }
