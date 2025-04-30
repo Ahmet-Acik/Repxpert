@@ -1,9 +1,9 @@
-import fs from "fs";
+import fs from "fs/promises";
 import path from "path";
 import * as XLSX from "xlsx";
 
 interface Product {
-  reference_OE: string; // Ürünün referansı
+  reference_OE: string;
   id: string;
   name: string;
   brand: string;
@@ -20,29 +20,36 @@ interface Product {
   };
 }
 
-// Ana klasör yolu
+// Constants
 const ROOT_DIR = "./data/TRW";
+const OUTPUT_FILE = "output.xlsx";
 
-// Excel'e yazmak üzere tüm verileri bu dizide toplayacağız
+// Excel data array
 const excelData: any[] = [];
 
-function getAllJsonFiles(dirPath: string): string[] {
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+// Recursively get all JSON files
+async function getAllJsonFiles(dirPath: string): Promise<string[]> {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
 
-  return entries.flatMap((entry) => {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      return getAllJsonFiles(fullPath);
-    } else if (entry.isFile() && entry.name.endsWith(".json")) {
-      return [fullPath];
-    }
-    return [];
-  });
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        return getAllJsonFiles(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith(".json")) {
+        return [fullPath];
+      }
+      return [];
+    })
+  );
+
+  return files.flat();
 }
 
-function prepareRow(json: Product): any {
-    const idColumnName = `${json.brand}_ID`;
-  const row: any = {
+// Prepare a row for Excel
+function prepareRow(json: Product): Record<string, string> {
+  const idColumnName = `${json.brand}_ID`;
+  const row: Record<string, string> = {
     REFERENCE_OE: json.reference_OE || "",
     [idColumnName]: json.id || "",
     BRAND: json.brand || "",
@@ -54,13 +61,13 @@ function prepareRow(json: Product): any {
     CHECKMARK: json.dimensions?.checkmark || "",
   };
 
-  // wvaNumbers: wva1, wva2, wva3, ...
+  // Add WVA numbers
   const wva = json.wvaNumbers || [];
   for (let i = 0; i < 4; i++) {
     row[`WVA_${i + 1}`] = wva[i] || "";
   }
 
-  // oeNumbers: oe1, oe2, oe3, ...
+  // Add OE numbers
   const oe = json.oeNumbers || [];
   oe.forEach((num, index) => {
     row[`OE_${index + 1}`] = num;
@@ -69,6 +76,7 @@ function prepareRow(json: Product): any {
   return row;
 }
 
+// Export data to Excel
 function exportToExcel(data: any[], outputPath: string) {
   const ws = XLSX.utils.json_to_sheet(data);
   const wb = XLSX.utils.book_new();
@@ -76,22 +84,27 @@ function exportToExcel(data: any[], outputPath: string) {
   XLSX.writeFile(wb, outputPath);
 }
 
-function main() {
-  const jsonFiles = getAllJsonFiles(ROOT_DIR);
+// Main function
+async function main() {
+  try {
+    const jsonFiles = await getAllJsonFiles(ROOT_DIR);
 
-  jsonFiles.forEach((filePath) => {
-    const raw = fs.readFileSync(filePath, "utf-8");
-    try {
-      const json: Product = JSON.parse(raw);
-      const row = prepareRow(json);
-      excelData.push(row);
-    } catch (err) {
-      console.error(`Hatalı JSON: ${filePath}`, err);
+    for (const filePath of jsonFiles) {
+      try {
+        const raw = await fs.readFile(filePath, "utf-8");
+        const json: Product = JSON.parse(raw);
+        const row = prepareRow(json);
+        excelData.push(row);
+      } catch (err) {
+        console.error(`Invalid JSON file: ${filePath}`, err);
+      }
     }
-  });
 
-  exportToExcel(excelData, "output.xlsx");
-  console.log(`✅ Excel dosyası oluşturuldu: output.xlsx`);
+    exportToExcel(excelData, OUTPUT_FILE);
+    console.log(`✅ Excel file created: ${OUTPUT_FILE}`);
+  } catch (err) {
+    console.error("Error during processing:", err);
+  }
 }
 
 main();
